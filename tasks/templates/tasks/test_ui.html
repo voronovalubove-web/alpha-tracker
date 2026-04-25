@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Тестовый UI | Alpha-Soft</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 950px; margin: 2rem auto; padding: 0 1rem; color: #333; }
+        .tabs { display: flex; gap: 1rem; margin-bottom: 1.5rem; border-bottom: 2px solid #eee; }
+        .tab { padding: 0.7rem 1.2rem; cursor: pointer; background: #f8f9fa; border-radius: 8px 8px 0 0; border: 1px solid #ddd; border-bottom: none; }
+        .tab.active { background: #0d6efd; color: white; border-color: #0d6efd; }
+        .section { display: none; padding: 1rem 0; }
+        .section.active { display: block; }
+        input, select, textarea, button { padding: 0.5rem; margin: 0.3rem 0; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #0d6efd; color: white; border: none; cursor: pointer; font-weight: 500; }
+        button:hover { background: #0b5ed7; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 0.8rem; margin: 0.5rem 0; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; }
+        .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+        .badge.owner { background: #e2e3ff; color: #3d3f89; }
+        .badge.member { background: #d1e7dd; color: #0f5132; }
+        .msg { margin-top: 0.5rem; font-size: 0.9rem; }
+        .msg.success { color: #198754; } .msg.error { color: #dc3545; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>🔧 Alpha-Soft Tracker (Test UI)</h1>
+    <div id="auth-status">Загрузка...</div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('projects')">📁 Проекты</div>
+        <div class="tab" onclick="showTab('tasks')">📝 Задачи</div>
+    </div>
+
+    <!-- ПРОЕКТЫ -->
+    <div id="projects" class="section active">
+        <div class="grid">
+            <div>
+                <h2>Мои проекты</h2>
+                <ul id="project-list"><li>Загрузка...</li></ul>
+                <h3>Создать проект</h3>
+                <input type="text" id="proj-name" placeholder="Название">
+                <textarea id="proj-desc" placeholder="Описание" rows="2"></textarea>
+                <button onclick="createProject()">Создать</button>
+                <div id="proj-msg" class="msg"></div>
+            </div>
+            <div id="member-panel" style="display:none;">
+                <h3>👥 Участники: <span id="manage-proj-name"></span></h3>
+                <div id="current-members"></div>
+                <select id="add-member-select"><option value="">Выберите пользователя</option></select>
+                <button onclick="addMemberToProject()">Добавить в проект</button>
+                <div id="member-msg" class="msg"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ЗАДАЧИ -->
+    <div id="tasks" class="section">
+        <div class="grid">
+            <div>
+                <h2>Задачи проекта</h2>
+                <select id="task-filter-project" onchange="loadTasks()">
+                    <option value="">Все проекты</option>
+                </select>
+                <ul id="task-list"><li>Загрузка...</li></ul>
+            </div>
+            <div>
+                <h3>Создать задачу</h3>
+                <input type="text" id="task-title" placeholder="Заголовок">
+                <select id="task-project" onchange="updateAssigneeOptions()">
+                    <option value="">Выберите проект</option>
+                </select>
+                <select id="task-assignee">
+                    <option value="">Без исполнителя</option>
+                </select>
+                <select id="task-priority">
+                    <option value="low">Низкий</option>
+                    <option value="medium" selected>Средний</option>
+                    <option value="high">Высокий</option>
+                    <option value="urgent">Срочный</option>
+                </select>
+                <input type="date" id="task-deadline">
+                <textarea id="task-desc" placeholder="Описание" rows="2"></textarea>
+                <button onclick="createTask()">Создать задачу</button>
+                <div id="task-msg" class="msg"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = '/api';
+        let currentManagedProjectId = null; // Хранит ID проекта, чья панель участников открыта
+        let allUsers = [];
+        let projectMembersMap = {}; // { "projId_str": ["memberId_str", ...] }
+
+        // Получение CSRF-токена из куки
+        const CSRF_TOKEN = (function() {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    if (cookie.substring(0, 10) === 'csrftoken=') {
+                        cookieValue = decodeURIComponent(cookie.substring(10));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        })();
+
+        async function init() {
+            // 1. Проверка авторизации
+            const authRes = await fetch(`${API}/users/me/`, { credentials: 'include' });
+            const statusEl = document.getElementById('auth-status');
+            if (!authRes.ok) {
+                statusEl.innerHTML = `<span style="color:#dc3545">❌ Не авторизован. Войдите через <a href="/admin/">/admin/</a></span>`;
+                return;
+            }
+            const authData = await authRes.json();
+            statusEl.innerHTML = `<span style="color:#198754">✅ ${authData.username}</span>`;
+
+            // 2. Загрузка пользователей (нормализуем ID в строки)
+            try {
+                const usersRes = await fetch(`${API}/users/`, { credentials: 'include' });
+                if (usersRes.ok) {
+                    const data = await usersRes.json();
+                    allUsers = (data.results || data).map(u => ({ ...u, id: String(u.id) }));
+                }
+            } catch (e) { console.error('Ошибка загрузки пользователей:', e); }
+
+            // 3. Загрузка проектов
+            loadProjects();
+        }
+
+        function showTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(tabId).classList.add('active');
+            if (tabId === 'tasks') loadTasks();
+        }
+
+        async function loadProjects() {
+            const res = await fetch(`${API}/projects/`, { credentials: 'include' });
+            const data = await res.json();
+            const list = document.getElementById('project-list');
+            const projSelect = document.getElementById('task-project');
+            const filterSelect = document.getElementById('task-filter-project');
+
+            list.innerHTML = '';
+            projSelect.innerHTML = '<option value="">Выберите проект</option>';
+            filterSelect.innerHTML = '<option value="">Все проекты</option>';
+            projectMembersMap = {};
+
+            data.results.forEach(p => {
+                const pid = String(p.id);
+                const members = (p.members || []).map(String);
+                projectMembersMap[pid] = members;
+
+                list.innerHTML += `<li onclick="openMemberPanel('${pid}', '${p.name.replace(/'/g, "\\'")}')" style="cursor:pointer">
+                    <strong>${p.name}</strong> <span style="font-size:0.8rem; color:#666">(ID: ${pid})</span>
+                    <br><small>Участников: ${members.length}</small>
+                </li>`;
+
+                const opt = `<option value="${pid}">${p.name}</option>`;
+                projSelect.innerHTML += opt;
+                filterSelect.innerHTML += opt;
+            });
+        }
+
+        function openMemberPanel(projId, projName) {
+            currentManagedProjectId = projId; // Запоминаем активный проект
+            document.getElementById('member-panel').style.display = 'block';
+            document.getElementById('manage-proj-name').textContent = projName;
+            document.getElementById('member-msg').textContent = '';
+
+            const currentMembers = projectMembersMap[projId] || [];
+            document.getElementById('current-members').innerHTML = currentMembers.map(uid => {
+                const u = allUsers.find(x => x.id === uid);
+                return `<span class="badge member">${u ? u.username : uid}</span>`;
+            }).join(' ') || '<em>Нет участников</em>';
+
+            const select = document.getElementById('add-member-select');
+            select.innerHTML = '<option value="">Выберите пользователя</option>';
+            allUsers.filter(u => !currentMembers.includes(u.id)).forEach(u => {
+                select.innerHTML += `<option value="${u.id}">${u.username}</option>`;
+            });
+        }
+
+        async function addMemberToProject() {
+            const projId = currentManagedProjectId;
+            if (!projId) return showMsg('member-msg', 'Сначала кликните на проект в списке', 'error');
+            
+            const userId = document.getElementById('add-member-select').value;
+            if (!userId) return showMsg('member-msg', 'Выберите пользователя', 'error');
+
+            const current = projectMembersMap[projId] || [];
+            if (current.includes(userId)) return showMsg('member-msg', 'Пользователь уже в проекте', 'error');
+
+            const updated = [...current, userId];
+            const res = await fetch(`${API}/projects/${projId}/`, {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+                body: JSON.stringify({ members: updated })
+            });
+
+            if (res.ok) {
+                projectMembersMap[projId] = updated;
+                showMsg('member-msg', '✅ Участник добавлен', 'success');
+                loadProjects();
+                openMemberPanel(projId, document.getElementById('manage-proj-name').textContent);
+            } else {
+                const err = await res.json().catch(() => ({ detail: 'Ошибка сети' }));
+                showMsg('member-msg', '❌ ' + JSON.stringify(err), 'error');
+            }
+        }
+
+        function updateAssigneeOptions() {
+            const projId = document.getElementById('task-project').value;
+            const assigneeSelect = document.getElementById('task-assignee');
+            assigneeSelect.innerHTML = '<option value="">Без исполнителя</option>';
+
+            if (!projId || !projectMembersMap[projId]) {
+                assigneeSelect.innerHTML += '<option disabled>Сначала выберите проект</option>';
+                return;
+            }
+
+            const members = projectMembersMap[projId];
+            if (members.length === 0) {
+                assigneeSelect.innerHTML += '<option disabled>В проекте нет участников</option>';
+                return;
+            }
+
+            members.forEach(uid => {
+                const u = allUsers.find(x => x.id === uid);
+                assigneeSelect.innerHTML += `<option value="${uid}">${u ? u.username : uid}</option>`;
+            });
+        }
+
+        async function createProject() {
+            const name = document.getElementById('proj-name').value.trim();
+            const desc = document.getElementById('proj-desc').value.trim();
+            if (!name) return showMsg('proj-msg', 'Введите название', 'error');
+
+            const res = await fetch(`${API}/projects/`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+                body: JSON.stringify({ name, description: desc })
+            });
+
+            if (res.ok) {
+                showMsg('proj-msg', '✅ Проект создан!', 'success');
+                document.getElementById('proj-name').value = '';
+                document.getElementById('proj-desc').value = '';
+                loadProjects();
+            } else {
+                const err = await res.json().catch(() => ({ detail: 'Ошибка сети' }));
+                showMsg('proj-msg', '❌ ' + JSON.stringify(err), 'error');
+            }
+        }
+
+        async function loadTasks() {
+            const projFilter = document.getElementById('task-filter-project').value;
+            const url = projFilter ? `${API}/tasks/?project=${projFilter}` : `${API}/tasks/`;
+            const res = await fetch(url, { credentials: 'include' });
+            const data = await res.json();
+            const list = document.getElementById('task-list');
+            list.innerHTML = '';
+
+            data.results.forEach(t => {
+                const assigneeUser = allUsers.find(u => u.id === String(t.assignee));
+                const assigneeName = assigneeUser ? assigneeUser.username : (t.assignee ? `ID:${t.assignee}` : '—');
+                list.innerHTML += `<li>
+                    <strong>${t.title}</strong>
+                    <span class="badge" style="background:#fff3cd;color:#856404">${t.priority}</span>
+                    <span class="badge" style="background:#d3d3d3;color:#333">${t.status}</span>
+                    <br><small>👤 ${assigneeName} | 📅 ${t.deadline || '—'} | 📁 #${t.project}</small>
+                </li>`;
+            });
+        }
+
+        async function createTask() {
+            const title = document.getElementById('task-title').value.trim();
+            const projId = document.getElementById('task-project').value;
+            const priority = document.getElementById('task-priority').value;
+            const deadline = document.getElementById('task-deadline').value || null;
+            const desc = document.getElementById('task-desc').value.trim();
+            const assigneeVal = document.getElementById('task-assignee').value;
+
+            if (!title || !projId) return showMsg('task-msg', 'Заголовок и проект обязательны', 'error');
+
+            const payload = { title, project: projId, priority, deadline, description: desc };
+            if (assigneeVal) payload.assignee = assigneeVal;
+
+            const res = await fetch(`${API}/tasks/`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.ok) {
+                showMsg('task-msg', '✅ Задача создана!', 'success');
+                document.getElementById('task-title').value = '';
+                document.getElementById('task-desc').value = '';
+                document.getElementById('task-assignee').value = '';
+                document.getElementById('task-deadline').value = '';
+                loadTasks();
+            } else {
+                const err = await res.json().catch(() => ({ detail: 'Ошибка сети' }));
+                showMsg('task-msg', '❌ ' + JSON.stringify(err), 'error');
+            }
+        }
+
+        function showMsg(elId, text, type) {
+            document.getElementById(elId).innerHTML = `<span class="msg ${type}">${text}</span>`;
+        }
+
+        // Безопасный запуск после загрузки DOM
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
