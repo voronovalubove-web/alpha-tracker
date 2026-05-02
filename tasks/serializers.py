@@ -5,8 +5,13 @@ from .models import Project, Task
 
 User = get_user_model()
 
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username']
 
 class ProjectSerializer(serializers.ModelSerializer):
+    '''Сериализатор для Project с вложенным отображением участников.'''
     members = serializers.PrimaryKeyRelatedField(
         many=True, 
         queryset=User.objects.all(),
@@ -21,6 +26,7 @@ class ProjectSerializer(serializers.ModelSerializer):
 
 
 class TaskSerializer(serializers.ModelSerializer):
+    '''Сериализатор для Task с валидацией, что assignee является участником проекта.'''
     assignee = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(), 
         required=False, 
@@ -40,7 +46,8 @@ class TaskSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'author']
 
     def validate(self, data):
-        assignee = data.get('assignee')
+        '''Проверка, что назначенный исполнитель является участником проекта.'''
+        assignee = data.get('assignee') 
         
         project = data.get('project') or getattr(self.instance, 'project', None)
 

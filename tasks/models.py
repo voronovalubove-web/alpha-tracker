@@ -20,8 +20,7 @@ class Project(models.Model):
     class Meta:
         verbose_name = _('проект')
         verbose_name_plural = _('проекты')
-        ordering = ['-id']
-
+        ordering = ['-id'] 
     def __str__(self):
         return self.name
 

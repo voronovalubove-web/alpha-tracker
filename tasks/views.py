@@ -1,68 +1,75 @@
-from django.shortcuts import get_object_or_404, render
-from django.db.models import Q
-from rest_framework import viewsets, permissions, serializers
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 
+from rest_framework import viewsets, serializers
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied
+
 from .models import Project, Task
-from .serializers import ProjectSerializer, TaskSerializer
+from .serializers import ProjectSerializer, TaskSerializer, UserSerializer
+from .filters import TaskFilter
 from .permissions import ProjectTaskPermission
 
 User = get_user_model()
 
 class CurrentUserView(APIView):
-    """Возвращает данные текущего авторизованного пользователя"""
-    permission_classes = [permissions.IsAuthenticated]
+    '''Простой эндпоинт для получения данных текущего пользователя.'''
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response({
-            'username': request.user.username,
-            'id': request.user.id
-        })
+        return Response({'username': request.user.username, 'id': request.user.id})
+
+
+class UserViewSet(viewsets.ReadOnlyModelViewSet):
+    '''Эндпоинт для просмотра списка пользователей (для выбора в проектах/задачах).'''
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
+    '''Эндпоинт для управления проектами. Владелец проекта может делать всё,
+     участники могут только читать.'''
     serializer_class = ProjectSerializer
-    permission_classes = [permissions.IsAuthenticated, ProjectTaskPermission]
-    filterset_fields = ['name']
+    permission_classes = [IsAuthenticated, ProjectTaskPermission]
 
     def get_queryset(self):
-        """пользователь видит только свои проекты или те, где он участник"""
         user = self.request.user
-        return Project.objects.filter(
-            Q(owner=user) | Q(members=user)
+        return (
+            Project.objects.filter(owner=user) | Project.objects.filter(members=user)
         ).distinct()
 
     def perform_create(self, serializer):
-        """Автоматически назначаем текущего пользователя владельцем"""
         serializer.save(owner=self.request.user)
 
 
 class TaskViewSet(viewsets.ModelViewSet):
+    '''Эндпоинт для управления задачами. Владелец проекта может делать всё,
+     автор и исполнитель могут менять статус/приоритет, автор может менять описание, автор может удалять.'''
     serializer_class = TaskSerializer
-    permission_classes = [permissions.IsAuthenticated, ProjectTaskPermission]
-    filterset_fields = ['project', 'status', 'priority', 'assignee', 'deadline']
+    permission_classes = [IsAuthenticated, ProjectTaskPermission]
+    filterset_class = TaskFilter
 
     def get_queryset(self):
-        """задачи видны только из проектов, где пользователь состоит"""
         user = self.request.user
-        return Task.objects.filter(
-            Q(project__owner=user) | Q(project__members=user)
+        return (
+            Task.objects.filter(project__owner=user) | Task.objects.filter(project__members=user)
         ).distinct()
 
     def perform_create(self, serializer):
-        """Проверяем доступ к проекту перед созданием задачи"""
         project_id = self.request.data.get('project')
-        if project_id:
-            get_object_or_404(
-                Project.objects.filter(Q(owner=self.request.user) | Q(members=self.request.user)),
-                id=project_id
-            )
+        if not project_id:
+            raise serializers.ValidationError({"project": "Укажите проект."})
+
+        get_object_or_404(
+            Project.objects.filter(owner=self.request.user) | Project.objects.filter(members=self.request.user),
+            id=project_id
+        )
         serializer.save(author=self.request.user)
 
     def perform_update(self, serializer):
-        """Ограничиваем редактируемые поля в зависимости от роли"""
         user = self.request.user
         task = self.get_object()
 
@@ -77,19 +84,7 @@ class TaskViewSet(viewsets.ModelViewSet):
             allowed_fields.add('description')
 
         filtered_data = {k: v for k, v in serializer.validated_data.items() if k in allowed_fields}
+        if not filtered_data:
+            raise PermissionDenied("Недостаточно прав для изменения этих полей.")
+
         serializer.save(**filtered_data)
-
-
-def test_ui(request):
-    """Отдает простой HTML-интерфейс для ручной проверки API"""
-    return render(request, 'tasks/test_ui.html')
-
-class UserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['id', 'username']
-
-class UserViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = [permissions.IsAuthenticated]
